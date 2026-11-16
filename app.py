@@ -336,11 +336,12 @@ with tab_detector:
             rtc_configuration=RTC_CONFIGURATION,
             media_stream_constraints={
                 "video": {
-                    "width": {"ideal": 1280},
-                    "height": {"ideal": 720}
+                    "width": {"min": 640, "ideal": 1280, "max": 1920},
+                    "height": {"min": 480, "ideal": 720, "max": 1080}
                 },
                 "audio": False
-            }
+            },
+            async_processing=True
         )
         st.markdown('</div>', unsafe_allow_html=True)
 
