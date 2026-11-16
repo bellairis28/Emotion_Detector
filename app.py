@@ -96,6 +96,15 @@ st.markdown("""
         margin-top: 0.5rem;
         letter-spacing: 0.5px;
     }
+    
+    /* Forzar alta calidad y nitidez en el video WebRTC */
+    video {
+        width: 100% !important;
+        height: auto !important;
+        object-fit: contain;
+        image-rendering: -webkit-optimize-contrast;
+        image-rendering: crisp-edges;
+    }
     </style>
     
     <div class="header-container">
@@ -233,7 +242,6 @@ class EmotionTransformer(VideoTransformerBase):
         h, w, _ = img_raw.shape
         
         main_img = img_raw.copy()
-        clean_img = img_raw.copy()
         
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(img_raw, cv2.COLOR_BGR2RGB))
         results = self.detector.detect(mp_image)
@@ -263,7 +271,7 @@ class EmotionTransformer(VideoTransformerBase):
                 face_box = (xmin, ymin, xmax, ymax)
 
                 # Dibujar malla de puntos (grafos) en primer plano (main_img) con alta calidad (radio adaptativo)
-                circle_radius = max(2, int(w / 600))
+                circle_radius = max(2, int(w / 500))
                 for lm in face_landmarks:
                     cv2.circle(main_img, (int(lm.x * w), int(lm.y * h)), circle_radius, (0, 255, 0), -1, cv2.LINE_AA)
 
@@ -304,17 +312,8 @@ class EmotionTransformer(VideoTransformerBase):
             end_point = (center_x, top_circle_y)
             draw_curved_arrow(main_img, start_point, end_point, color=(0, 0, 255), thickness=3)
 
-        pip_w, pip_h = int(w * 0.18), int(h * 0.18)
-        pip_resized = cv2.resize(clean_img, (pip_w, pip_h))
-        
-        x_offset = w - pip_w - 20
-        y_offset = 20
-        
-        cv2.rectangle(main_img, (x_offset - 2, y_offset - 2), (x_offset + pip_w + 2, y_offset + pip_h + 2), (255, 255, 255), 2)
-        main_img[y_offset:y_offset+pip_h, x_offset:x_offset+pip_w] = pip_resized
-        
-        cv2.putText(main_img, "Camara Original", (x_offset, y_offset - 8), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(main_img, f"Resolucion: {w}x{h}", (20, h - 25), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
         return av.VideoFrame.from_ndarray(main_img, format="bgr24")
 
@@ -336,8 +335,9 @@ with tab_detector:
             rtc_configuration=RTC_CONFIGURATION,
             media_stream_constraints={
                 "video": {
-                    "width": {"min": 640, "ideal": 1280, "max": 1920},
-                    "height": {"min": 480, "ideal": 720, "max": 1080}
+                    "width": {"min": 1280, "ideal": 1920, "max": 1920},
+                    "height": {"min": 720, "ideal": 1080, "max": 1080},
+                    "frameRate": {"ideal": 30, "max": 30}
                 },
                 "audio": False
             },
