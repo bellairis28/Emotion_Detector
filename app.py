@@ -233,7 +233,7 @@ class EmotionTransformer(VideoTransformerBase):
         h, w, _ = img_raw.shape
         
         main_img = img_raw.copy()
-        tracked_img = img_raw.copy()
+        clean_img = img_raw.copy()
         
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(img_raw, cv2.COLOR_BGR2RGB))
         results = self.detector.detect(mp_image)
@@ -262,10 +262,9 @@ class EmotionTransformer(VideoTransformerBase):
                 ymin, ymax = int(min(ys)), int(max(ys))
                 face_box = (xmin, ymin, xmax, ymax)
 
-                cv2.putText(tracked_img, f"Emocion: {emocion_detectada}", (20, 40), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                # Dibujar malla de puntos (grafos) en primer plano (main_img)
                 for lm in face_landmarks:
-                    cv2.circle(tracked_img, (int(lm.x * w), int(lm.y * h)), 1, (0, 255, 0), -1)
+                    cv2.circle(main_img, (int(lm.x * w), int(lm.y * h)), 1, (0, 255, 0), -1)
 
         now = time.time()
         # Mantener la emoción fija 1 segundo cuando se detecta
@@ -305,7 +304,7 @@ class EmotionTransformer(VideoTransformerBase):
             draw_curved_arrow(main_img, start_point, end_point, color=(0, 0, 255), thickness=3)
 
         pip_w, pip_h = int(w * 0.3), int(h * 0.3)
-        pip_resized = cv2.resize(tracked_img, (pip_w, pip_h))
+        pip_resized = cv2.resize(clean_img, (pip_w, pip_h))
         
         x_offset = w - pip_w - 20
         y_offset = 20
@@ -313,7 +312,7 @@ class EmotionTransformer(VideoTransformerBase):
         cv2.rectangle(main_img, (x_offset - 2, y_offset - 2), (x_offset + pip_w + 2, y_offset + pip_h + 2), (255, 255, 255), 2)
         main_img[y_offset:y_offset+pip_h, x_offset:x_offset+pip_w] = pip_resized
         
-        cv2.putText(main_img, "Tracking Mesh", (x_offset, y_offset - 8), 
+        cv2.putText(main_img, "Camara Original", (x_offset, y_offset - 8), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
         return av.VideoFrame.from_ndarray(main_img, format="bgr24")
