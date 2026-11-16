@@ -262,9 +262,10 @@ class EmotionTransformer(VideoTransformerBase):
                 ymin, ymax = int(min(ys)), int(max(ys))
                 face_box = (xmin, ymin, xmax, ymax)
 
-                # Dibujar malla de puntos (grafos) en primer plano (main_img)
+                # Dibujar malla de puntos (grafos) en primer plano (main_img) con alta calidad (radio adaptativo)
+                circle_radius = max(2, int(w / 600))
                 for lm in face_landmarks:
-                    cv2.circle(main_img, (int(lm.x * w), int(lm.y * h)), 1, (0, 255, 0), -1)
+                    cv2.circle(main_img, (int(lm.x * w), int(lm.y * h)), circle_radius, (0, 255, 0), -1, cv2.LINE_AA)
 
         now = time.time()
         # Mantener la emoción fija 1 segundo cuando se detecta
@@ -303,7 +304,7 @@ class EmotionTransformer(VideoTransformerBase):
             end_point = (center_x, top_circle_y)
             draw_curved_arrow(main_img, start_point, end_point, color=(0, 0, 255), thickness=3)
 
-        pip_w, pip_h = int(w * 0.3), int(h * 0.3)
+        pip_w, pip_h = int(w * 0.18), int(h * 0.18)
         pip_resized = cv2.resize(clean_img, (pip_w, pip_h))
         
         x_offset = w - pip_w - 20
