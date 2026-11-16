@@ -13,13 +13,3 @@ env/
 .idea/
 .DS_Store
 
-# Modelo descargado automáticamente
-face_landmarker.task
-
-# Carpeta y archivos de imágenes
-imagenes/
-*.png
-*.jpg
-*.jpeg
-*.gif
-*.webp
