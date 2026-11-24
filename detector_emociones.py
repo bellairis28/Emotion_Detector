@@ -1,4 +1,5 @@
 import cv2
+import time
 import numpy as np
 import mediapipe as mp
 from mediapipe.tasks import python
@@ -46,6 +47,15 @@ COMISURA_DER = 291
 CEJA_IZQ_INT = 55
 CEJA_DER_INT = 285
 
+# Umbrales para detectar "Dormido"
+EAR_OJOS_CERRADOS = 0.15      # EAR por debajo de esto = ojos cerrados
+SEGUNDOS_PARA_DORMIDO = 1.5   # tiempo continuo con ojos cerrados
+
+# Calibración y umbrales para "Tristeza"
+FRAMES_CALIBRACION = 40
+UMBRAL_CAIDA_COMISURAS = 0.035   # cuánto deben bajar las comisuras vs. reposo (fracción de dist. interocular)
+UMBRAL_CENO = 0.025              # cuánto deben acercarse las cejas vs. reposo
+
 def calcular_distancia(p1, p2):
     return np.linalg.norm(np.array(p1) - np.array(p2))
 
@@ -73,24 +83,32 @@ def calcular_mar(landmarks, w, h):
         return 0.0
     return vertical / horizontal
 
-def clasificar_emocion(ear_promedio, mar, altura_comisuras_relativa, distancia_cejas_norm):
+def clasificar_emocion(ear_promedio, mar, altura_comisuras_relativa, distancia_cejas_norm,
+                       caida_comisuras, cierre_cejas, segundos_ojos_cerrados=0.0):
     """
-    Motor de reglas heurísticas refinado con la distancia interciliar (cejas).
+    Motor de reglas heurísticas. Tristeza usa cambios respecto a la cara neutra calibrada.
     """
+    # 0. Dormido: ojos cerrados de forma sostenida (prioridad máxima)
+    if segundos_ojos_cerrados >= SEGUNDOS_PARA_DORMIDO:
+        return "Dormido"
+
     # 1. Sorpresa: Ojos muy abiertos y boca abierta
-    if ear_promedio > 0.28 and mar > 0.35:
+    elif ear_promedio > 0.28 and mar > 0.35:
         return "Sorpresa"
     
     # 2. Felicidad: Comisuras de los labios elevadas
     elif altura_comisuras_relativa > 0.02 and mar > 0.15:
         return "Felicidad"
     
-    # 3. Tristeza: Comisuras caídas por debajo de la horizontal
-    elif altura_comisuras_relativa < -0.015 and mar < 0.15:
+    # 3. Tristeza: comisuras caídas + ceño fruncido (respecto a tu cara en reposo)
+    elif (caida_comisuras > UMBRAL_CAIDA_COMISURAS
+          and cierre_cejas > UMBRAL_CENO
+          and mar < 0.20):
         return "Tristeza"
     
     # 4. Enojo: Cejas notablemente juntas (distancia baja) + ojos ligeramente estrechados
-    elif distancia_cejas_norm < 0.35 and ear_promedio < 0.22:
+    #    (se añade el límite inferior para que un parpadeo no cuente como Enojo)
+    elif distancia_cejas_norm < 0.35 and EAR_OJOS_CERRADOS <= ear_promedio < 0.22:
         return "Enojo"
     
     # 5. Estado base
@@ -99,7 +117,15 @@ def clasificar_emocion(ear_promedio, mar, altura_comisuras_relativa, distancia_c
 
 # Inicializar captura de video
 cap = cv2.VideoCapture(0)
-print("[INFO] Sistema heurístico avanzado con detección de Enojo iniciado. Presiona 'q' para salir.")
+ojos_cerrados_desde = None
+
+# Estado de calibración
+calib_alt = []
+calib_cejas = []
+base_alt = None
+base_cejas = None
+
+print("[INFO] Sistema iniciado. Mantén cara neutra ~1-2 s para calibrar. Presiona 'q' para salir.")
 
 while cap.isOpened():
     success, frame = cap.read()
@@ -120,6 +146,15 @@ while cap.isOpened():
             ear_der = calcular_ear(face_landmarks, OJO_DER_SUP, OJO_DER_INF, OJO_DER_EXT, OJO_DER_INT, w, h)
             ear_promedio = (ear_izq + ear_der) / 2.0
 
+            # Cronómetro de ojos cerrados
+            if ear_promedio < EAR_OJOS_CERRADOS:
+                if ojos_cerrados_desde is None:
+                    ojos_cerrados_desde = time.time()
+                segundos_cerrados = time.time() - ojos_cerrados_desde
+            else:
+                ojos_cerrados_desde = None
+                segundos_cerrados = 0.0
+
             mar = calcular_mar(face_landmarks, w, h)
 
             # 2. Altura de comisuras labiales
@@ -139,8 +174,27 @@ while cap.isOpened():
             
             distancia_cejas_norm = dist_cejas / dist_interocular if dist_interocular > 0 else 0.0
 
-            # 4. Clasificación de la emoción
-            emocion = clasificar_emocion(ear_promedio, mar, altura_comisuras, distancia_cejas_norm)
+            # Altura de comisuras normalizada (positivo = comisuras arriba del centro de los labios)
+            altura_norm = (altura_comisuras * h) / dist_interocular if dist_interocular > 0 else 0.0
+
+            # 4. Calibración con cara neutra y clasificación
+            if base_alt is None:
+                calib_alt.append(altura_norm)
+                calib_cejas.append(distancia_cejas_norm)
+                if len(calib_alt) >= FRAMES_CALIBRACION:
+                    base_alt = float(np.median(calib_alt))
+                    base_cejas = float(np.median(calib_cejas))
+                emocion = "Neutral"
+                cv2.putText(frame, "Calibrando: manten cara neutra...", (30, h - 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+            else:
+                caida = base_alt - altura_norm                 # >0 = comisuras más bajas que en reposo
+                cierre = base_cejas - distancia_cejas_norm     # >0 = cejas más juntas que en reposo
+                emocion = clasificar_emocion(ear_promedio, mar, altura_comisuras, distancia_cejas_norm,
+                                             caida, cierre, segundos_cerrados)
+                # Valores de depuración para ajustar umbrales
+                cv2.putText(frame, f"caida: {caida:.3f}  ceno: {cierre:.3f}", (30, h - 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 150, 0), 2)
 
             # 5. Mostrar métricas en pantalla
             cv2.putText(frame, f"EAR: {ear_promedio:.2f} | MAR: {mar:.2f}", (30, 40), 
@@ -153,11 +207,21 @@ while cap.isOpened():
             # Dibujar puntos clave
             for lm in face_landmarks:
                 cv2.circle(frame, (int(lm.x * w), int(lm.y * h)), 1, (0, 255, 0), -1)
+    else:
+        # Sin rostro: reinicia el cronómetro de ojos cerrados
+        ojos_cerrados_desde = None
 
     cv2.imshow('Reconocimiento de Emociones - Heuristica', frame)
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    key = cv2.waitKey(1) & 0xFF
+    if key == ord('q'):
         break
+    elif key == ord('r'):
+        # Recalibrar con la tecla 'r'
+        calib_alt.clear()
+        calib_cejas.clear()
+        base_alt = None
+        base_cejas = None
 
 cap.release()
 cv2.destroyAllWindows()

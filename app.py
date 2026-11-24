@@ -133,7 +133,8 @@ emotion_files = {
     "Felicidad": "imagenes/happy.jpeg",
     "Tristeza": "imagenes/sad.jpeg",
     "Enojo": "imagenes/angry.jpeg",
-    "Sorpresa": "imagenes/surprise.jpeg"
+    "Sorpresa": "imagenes/surprise.jpeg",
+    "Dormido": "imagenes/dormido.jpeg"
 }
 for emo, path in emotion_files.items():
     if os.path.exists(path):
@@ -156,6 +157,19 @@ LABIO_SUP = 13
 LABIO_INF = 14
 COMISURA_IZQ = 61
 COMISURA_DER = 291
+
+# Cejas (puntos internos más cercanos a la glabela)
+CEJA_IZQ_INT = 55
+CEJA_DER_INT = 285
+
+# Umbrales para detectar "Dormido"
+EAR_OJOS_CERRADOS = 0.15      # EAR por debajo de esto = ojos cerrados
+SEGUNDOS_PARA_DORMIDO = 1.5   # tiempo continuo con ojos cerrados
+
+# Calibración y umbrales para "Tristeza"
+FRAMES_CALIBRACION = 40
+UMBRAL_CAIDA_COMISURAS = 0.035   # cuánto deben bajar las comisuras vs. reposo (fracción de dist. interocular)
+UMBRAL_CENO = 0.025              # cuánto deben acercarse las cejas vs. reposo
 
 def calcular_distancia(p1, p2):
     return np.linalg.norm(np.array(p1) - np.array(p2))
@@ -184,15 +198,22 @@ def calcular_mar(landmarks, w, h):
         return 0.0
     return vertical / horizontal
 
-def clasificar_emocion(ear_promedio, mar, altura_comisuras_relativa):
-    # Parámetros originales restaurados exactamente como estaban
-    if ear_promedio > 0.28 and mar > 0.35:
+def clasificar_emocion(ear_promedio, mar, altura_comisuras_relativa,
+                       caida_comisuras, cierre_cejas, segundos_ojos_cerrados=0.0):
+    # Dormido tiene prioridad: ojos cerrados de forma sostenida
+    if segundos_ojos_cerrados >= SEGUNDOS_PARA_DORMIDO:
+        return "Dormido"
+    elif ear_promedio > 0.28 and mar > 0.35:
         return "Sorpresa"
     elif altura_comisuras_relativa > 0.02 and mar > 0.15:
         return "Felicidad"
-    elif altura_comisuras_relativa < -0.015 and mar < 0.15:
+    # Tristeza: comisuras caídas + ceño fruncido (respecto a tu cara en reposo)
+    elif (caida_comisuras > UMBRAL_CAIDA_COMISURAS
+          and cierre_cejas > UMBRAL_CENO
+          and mar < 0.20):
         return "Tristeza"
-    elif ear_promedio < 0.18 and mar < 0.12:
+    # Se añade el límite inferior para que un parpadeo no cuente como Enojo
+    elif EAR_OJOS_CERRADOS <= ear_promedio < 0.18 and mar < 0.12:
         return "Enojo"
     else:
         return "Neutral"
@@ -235,6 +256,13 @@ class EmotionTransformer(VideoTransformerBase):
         self.locked_emotion = "Neutral"
         self.lock_until = 0.0
         self.ready_for_next = True
+        self.eyes_closed_since = None
+
+        # Calibración de cara neutra (para Tristeza)
+        self.calib_alt = []
+        self.calib_cejas = []
+        self.base_alt = None
+        self.base_cejas = None
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img_raw = frame.to_ndarray(format="bgr24")
@@ -255,6 +283,15 @@ class EmotionTransformer(VideoTransformerBase):
                 ear_der = calcular_ear(face_landmarks, OJO_DER_SUP, OJO_DER_INF, OJO_DER_EXT, OJO_DER_INT, w, h)
                 ear_val = (ear_izq + ear_der) / 2.0
 
+                # Cronómetro de ojos cerrados
+                if ear_val < EAR_OJOS_CERRADOS:
+                    if self.eyes_closed_since is None:
+                        self.eyes_closed_since = time.time()
+                    segundos_cerrados = time.time() - self.eyes_closed_since
+                else:
+                    self.eyes_closed_since = None
+                    segundos_cerrados = 0.0
+
                 mar_val = calcular_mar(face_landmarks, w, h)
 
                 comisura_izq_y = face_landmarks[COMISURA_IZQ].y
@@ -262,7 +299,38 @@ class EmotionTransformer(VideoTransformerBase):
                 centro_labios_y = (face_landmarks[LABIO_SUP].y + face_landmarks[LABIO_INF].y) / 2.0
                 altura_comisuras = centro_labios_y - ((comisura_izq_y + comisura_der_y) / 2.0)
 
-                emocion_detectada = clasificar_emocion(ear_val, mar_val, altura_comisuras)
+                # Distancia interocular en píxeles
+                p_ext_izq = np.array([face_landmarks[OJO_IZQ_EXT].x * w, face_landmarks[OJO_IZQ_EXT].y * h])
+                p_ext_der = np.array([face_landmarks[OJO_DER_EXT].x * w, face_landmarks[OJO_DER_EXT].y * h])
+                dist_inter = np.linalg.norm(p_ext_izq - p_ext_der)
+
+                # Altura de comisuras normalizada (positivo = comisuras arriba del centro de los labios)
+                altura_norm = (altura_comisuras * h) / dist_inter if dist_inter > 0 else 0.0
+
+                # Distancia entre cejas internas normalizada (menor = ceño fruncido)
+                ceja_i = np.array([face_landmarks[CEJA_IZQ_INT].x * w, face_landmarks[CEJA_IZQ_INT].y * h])
+                ceja_d = np.array([face_landmarks[CEJA_DER_INT].x * w, face_landmarks[CEJA_DER_INT].y * h])
+                cejas_norm = np.linalg.norm(ceja_i - ceja_d) / dist_inter if dist_inter > 0 else 0.0
+
+                # Calibración con cara neutra
+                if self.base_alt is None:
+                    self.calib_alt.append(altura_norm)
+                    self.calib_cejas.append(cejas_norm)
+                    if len(self.calib_alt) >= FRAMES_CALIBRACION:
+                        self.base_alt = float(np.median(self.calib_alt))
+                        self.base_cejas = float(np.median(self.calib_cejas))
+                    emocion_detectada = "Neutral"
+                    cv2.putText(main_img, "Calibrando: manten cara neutra...", (20, h - 60),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+                else:
+                    caida = self.base_alt - altura_norm        # >0 = comisuras más bajas que en reposo
+                    cierre = self.base_cejas - cejas_norm      # >0 = cejas más juntas que en reposo
+                    emocion_detectada = clasificar_emocion(
+                        ear_val, mar_val, altura_comisuras, caida, cierre, segundos_cerrados
+                    )
+                    # Valores de depuración para ajustar umbrales
+                    cv2.putText(main_img, f"caida: {caida:.3f}  ceno: {cierre:.3f}", (20, h - 60),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 150, 0), 2)
 
                 xs = [lm.x * w for lm in face_landmarks]
                 ys = [lm.y * h for lm in face_landmarks]
@@ -274,6 +342,9 @@ class EmotionTransformer(VideoTransformerBase):
                 circle_radius = max(2, int(w / 500))
                 for lm in face_landmarks:
                     cv2.circle(main_img, (int(lm.x * w), int(lm.y * h)), circle_radius, (0, 255, 0), -1, cv2.LINE_AA)
+        else:
+            # Sin rostro: reinicia el cronómetro de ojos cerrados
+            self.eyes_closed_since = None
 
         now = time.time()
         # Mantener la emoción fija 1 segundo cuando se detecta
@@ -355,7 +426,8 @@ with tab_detector:
                 <ol style="padding-left: 20px; color: #a1a1a6; font-size: 0.9rem; line-height: 1.6;">
                     <li>Haz clic en <b>Start</b> en el reproductor.</li>
                     <li>Permite el acceso a tu cámara web.</li>
-                    <li>Ubícate frente al lente para iniciar el escaneo facial.</li>
+                    <li>Ubícate frente al lente y mantén una <b>cara neutra</b> 1-2 segundos mientras se calibra.</li>
+                    <li>Luego prueba tus gestos (por ejemplo, ceño fruncido y comisuras abajo para Tristeza).</li>
                 </ol>
             </div>
         """, unsafe_allow_html=True)
@@ -417,8 +489,8 @@ with tab_slides:
                         <p style="color: #86868b; font-size: 0.95rem; margin-bottom: 0;">Procesamiento continuo fotograma por fotograma sin retrasos.</p>
                     </div>
                     <div style="background: rgba(255,255,255,0.03); padding: 1.5rem; border-radius: 0.75rem; border: 1px solid rgba(255,255,255,0.06);">
-                        <h4 style="color: #ffffff; margin-top: 0; font-size: 1.1rem;">5 Emociones</h4>
-                        <p style="color: #86868b; font-size: 0.95rem; margin-bottom: 0;">Clasificación instantánea: Felicidad, Tristeza, Enojo, Sorpresa y Neutral.</p>
+                        <h4 style="color: #ffffff; margin-top: 0; font-size: 1.1rem;">6 Estados</h4>
+                        <p style="color: #86868b; font-size: 0.95rem; margin-bottom: 0;">Clasificación instantánea: Felicidad, Tristeza, Enojo, Sorpresa, Dormido y Neutral.</p>
                     </div>
                     <div style="background: rgba(255,255,255,0.03); padding: 1.5rem; border-radius: 0.75rem; border: 1px solid rgba(255,255,255,0.06);">
                         <h4 style="color: #ffffff; margin-top: 0; font-size: 1.1rem;">Modo Dual</h4>
@@ -463,7 +535,7 @@ with tab_slides:
                     <div style="background: rgba(255,255,255,0.03); padding: 1.75rem; border-radius: 0.75rem; border: 1px solid rgba(255,255,255,0.06);">
                         <h4 style="color: #ffffff; margin-top: 0; font-size: 1.2rem;">EAR (Eye Aspect Ratio)</h4>
                         <p style="color: #86868b; font-size: 1rem; line-height: 1.6; margin-bottom: 0;">
-                            Relación entre la distancia vertical y horizontal de los ojos. Permite detectar estados de sorpresa (ojos muy abiertos) o concentración/enojo.
+                            Relación entre la distancia vertical y horizontal de los ojos. Permite detectar sorpresa (ojos muy abiertos), enojo (ojos entrecerrados) y somnolencia (ojos cerrados de forma sostenida).
                         </p>
                     </div>
                     <div style="background: rgba(255,255,255,0.03); padding: 1.75rem; border-radius: 0.75rem; border: 1px solid rgba(255,255,255,0.06);">
